@@ -62,7 +62,6 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
     std::memcpy(jmp_patch + 1, &jmp_offset, 4u);
     std::memcpy(reinterpret_cast<void*>(to_hook), jmp_patch, sizeof(jmp_patch));
 
-
     if (restore)
     {
         // create the detour
@@ -72,7 +71,6 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
         std::memcpy(reinterpret_cast<void*>(this->context), this->function_o, this->function_size);
 
         // jmp back
-        std::uint8_t jmp_patch[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
         const auto jmp_addr = to_hook - (this->context + this->function_size + 5) + 5;
 
         std::memcpy(jmp_patch + 1, &jmp_addr, 4u);
