@@ -60,7 +60,7 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
     const auto jmp_offset = (to_replace - to_hook) - 5;
 
     std::memcpy(jmp_patch + 1, &jmp_offset, 4u);
-    std::memcpy(reinterpret_cast<void*>(to_hook), jmp_patch, sizeof(jmp_patch));
+    std::memmove(reinterpret_cast<void*>(to_hook), jmp_patch, 5u);
 
     if (restore)
     {
@@ -74,7 +74,7 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
         const auto jmp_addr = to_hook - (this->context + this->function_size + 5) + 5;
 
         std::memcpy(jmp_patch + 1, &jmp_addr, 4u);
-        std::memcpy(reinterpret_cast<void*>(this->context + this->function_size), jmp_patch, 5u);
+        std::memmove(reinterpret_cast<void*>(this->context + this->function_size), jmp_patch, 5u);
     }
 
     if (nops)
