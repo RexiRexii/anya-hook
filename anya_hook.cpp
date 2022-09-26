@@ -6,37 +6,18 @@ anya_hook::anya_hook()
     this->function_o = nullptr; // old
     this->function_t = nullptr; // backup
 
+    this->context = 0; // detour
+
     this->function_size = 0;
+    this->allocate = false;
 }
 
 // detour is basically used in making a certain instruction(s) jmp to a different location
 // if its done wrong then it can cause so many things, so we make sure we "jmp back" to the original position after whatever we do
-void anya_hook::detour(const std::uintptr_t to_hook, const std::uintptr_t to_replace, const std::size_t length)
+std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_t to_replace, std::int32_t instr_nops, bool restore)
 {
-    // let us read/write to memory as much as we want
-    DWORD old_protect{0};
-
-    VirtualProtect(reinterpret_cast<void*>(to_hook), length, PAGE_EXECUTE_READWRITE, &old_protect);
-
-    // clone the original memory's contents, we will be using them for other functions (e.g yield)
-    this->function_o = reinterpret_cast<std::uint8_t*>(std::malloc(length));
-
-    for (auto i = 0u; i < length; i++)
-       this->function_o[i] = *reinterpret_cast<std::uint8_t*>(to_hook + i);
-
-    std::memset(reinterpret_cast<void*>(to_hook), 0x90, length);
-
-    *reinterpret_cast<std::uint8_t*>(to_hook) = 0xE9;
-    *reinterpret_cast<std::uintptr_t*>(to_hook + 1) = (to_replace - to_hook - 5);
-
-    VirtualProtect(reinterpret_cast<void*>(to_hook), length, old_protect, &old_protect);
-}
-
-std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_t to_replace, std::int32_t instr_nops)
-{
-    // calculate the size of the function you're trying to hook
-    auto at = to_hook; // we have to do it like this, otherwise HDE32 Disassembler fucks up
-    auto nops = 0u;
+    auto at = to_hook;
+    auto nops = 0;
 
     while (true)
     {
@@ -53,29 +34,56 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
                 instr_nops--;
                 continue;
             }
-
             break;
         }
     }
 
     nops -= 5;
-    this->function_size = (nops + 5);
-    
-    // create our detour
-    const auto detour = reinterpret_cast<std::uintptr_t>(VirtualAlloc(nullptr, this->function_size + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
-    // copy the contents
-    std::memmove(reinterpret_cast<void*>(detour), reinterpret_cast<void*>(to_hook), this->function_size);
+    // set the hook length, lowest you can do is 5
+    this->function_size = nops + 5;
+    this->allocate = restore;
 
-    // jmp
-    *reinterpret_cast<std::uint8_t*>(detour + this->function_size) = 0xE9;
+    // allow us to read and write memory at will
+    DWORD old_protect{0};
+    VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_size, PAGE_EXECUTE_READWRITE, &old_protect);
 
-    // add to jmp
-    const auto rel_addr = (to_hook - detour - 5);
-    *reinterpret_cast<std::uint32_t*>(detour + this->function_size + 1) = rel_addr;
+    // copy the original memory
+    // also exprssn i want YOU to try std::memcpy for yourself see how it goes :)
+    this->function_o = reinterpret_cast<std::uint8_t*>(std::malloc(this->function_size));
 
-    this->detour(to_hook, to_replace, this->function_size);
-    return detour;
+    for (auto i = 0u; i < this->function_size; i++)
+        this->function_o[i] = *reinterpret_cast<std::uint8_t*>(to_hook + i);
+
+    // jmp [function]
+    std::uint8_t jmp_patch[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+    const auto jmp_offset = (to_replace - to_hook) - 5;
+
+    std::memcpy(jmp_patch + 1, &jmp_offset, 4u);
+    std::memcpy(reinterpret_cast<void*>(to_hook), jmp_patch, sizeof(jmp_patch));
+
+
+    if (restore)
+    {
+        // create the detour
+        this->context = reinterpret_cast<const std::uintptr_t>(VirtualAlloc(nullptr, this->function_size + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+
+        // copy the original memory
+        std::memcpy(reinterpret_cast<void*>(this->context), this->function_o, this->function_size);
+
+        // jmp back
+        std::uint8_t jmp_patch[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+        const auto jmp_addr = to_hook - (this->context + this->function_size + 5) + 5;
+
+        std::memcpy(jmp_patch + 1, &jmp_addr, 4u);
+        std::memcpy(reinterpret_cast<void*>(this->context + this->function_size), jmp_patch, 5u);
+    }
+
+    if (nops)
+        std::memset(reinterpret_cast<void*>(to_hook + 5), 0x90, nops);
+
+    VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_size, old_protect, &old_protect);
+    return restore ? this->context : (to_hook + this->function_size);
 }
 
 // unhook will completely erase whatever you've hooked the function with
@@ -87,9 +95,12 @@ void anya_hook::unhook(std::uintptr_t to_unhook)
     VirtualProtect(reinterpret_cast<void*>(to_unhook), this->function_size, PAGE_EXECUTE_READWRITE, &old_protect);
     std::memcpy(reinterpret_cast<void*>(to_unhook), this->function_o, this->function_size);
     VirtualProtect(reinterpret_cast<void*>(to_unhook), this->function_size, old_protect, &old_protect);
-    VirtualFree(reinterpret_cast<void*>(to_unhook), 0, MEM_FREE);
 
     std::free(this->function_o);
+
+    if (this->allocate)
+        VirtualFree(reinterpret_cast<void*>(to_unhook), 0, MEM_FREE);
+
     to_unhook = 0;
 }
 
