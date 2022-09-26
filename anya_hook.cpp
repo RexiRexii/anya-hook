@@ -71,7 +71,7 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
         std::memcpy(reinterpret_cast<void*>(this->context), this->function_o, this->function_size);
 
         // jmp back
-        const auto jmp_addr = to_hook - (this->context + this->function_size + 5) + 5;
+        const auto jmp_addr = to_hook - (this->context + this->function_size) + 5;
 
         std::memcpy(jmp_patch + 1, &jmp_addr, 4u);
         std::memmove(reinterpret_cast<void*>(this->context + this->function_size), jmp_patch, 5u);
