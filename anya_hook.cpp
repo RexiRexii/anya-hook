@@ -1,5 +1,7 @@
 #include "anya_hook.hpp"
+
 #include "hde32_disasm.hpp"
+#include "hde64_disasm.hpp"
 
 anya_hook::anya_hook()
 {
@@ -8,52 +10,50 @@ anya_hook::anya_hook()
 
     this->context = 0; // detour
 
-    this->function_size = 0;
-    this->allocate = false;
+    this->function_length = 0;
 }
 
-// detour is basically used in making a certain instruction(s) jmp to a different location
-// if its done wrong then it can cause so many things, so we make sure we "jmp back" to the original position after whatever we do
-std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_t to_replace, std::int32_t instr_nops, bool restore)
+std::uintptr_t calculate_function_length(const std::uintptr_t to_calculate, const std::uint32_t length, std::uint32_t fnops = 0)
 {
-    auto at = to_hook;
-    auto nops = 0;
+    auto function = to_calculate;
+    auto size = 0u;
 
     while (true)
     {
         hde32s disasm{0};
-        hde32_disasm(reinterpret_cast<void*>(at), &disasm);
+        hde32_disasm(reinterpret_cast<void*>(function), &disasm);
 
-        at += disasm.len;
-        nops += disasm.len;
+        function += disasm.len;
+        size += disasm.len;
 
-        if (nops > 5)
+        if (size >= length)
         {
-            if (instr_nops)
-            {
-                instr_nops--;
+            if (fnops--)
                 continue;
-            }
+
             break;
         }
     }
 
-    nops -= 5;
+    size -= length;
+    return size;
+}
 
-    // set the hook length, lowest you can do is 5
-    this->function_size = nops + 5;
-    this->allocate = restore;
+// detour is basically used in making a certain instruction(s) jmp to a different location
+// if its done wrong then it can cause so many things, so we make sure we "jmp back" to the original position after whatever we do
+std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_t to_replace)
+{
+    // calculate hook's length
+    const auto length = calculate_function_length(to_hook, 5);
+    this->function_length = length + 5;
 
     // allow us to read and write memory at will
     DWORD old_protect{0};
-    VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_size, PAGE_EXECUTE_READWRITE, &old_protect);
+    VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_length, PAGE_EXECUTE_READWRITE, &old_protect);
 
     // copy the original memory
-    // also exprssn i want YOU to try std::memcpy for yourself see how it goes :)
-    this->function_o = reinterpret_cast<std::uint8_t*>(std::malloc(this->function_size));
-
-    for (auto i = 0u; i < this->function_size; i++)
-        this->function_o[i] = *reinterpret_cast<std::uint8_t*>(to_hook + i);
+    this->function_o = reinterpret_cast<std::uint8_t*>(std::malloc(this->function_length));
+    std::memcpy(this->function_o, reinterpret_cast<void*>(to_hook), this->function_length);
 
     // jmp [function]
     std::uint8_t jmp_patch[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
@@ -62,26 +62,23 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
     std::memcpy(jmp_patch + 1, &jmp_offset, 4u);
     std::memmove(reinterpret_cast<void*>(to_hook), jmp_patch, 5u);
 
-    if (restore)
-    {
-        // create the detour
-        this->context = reinterpret_cast<const std::uintptr_t>(VirtualAlloc(nullptr, this->function_size + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    // create the detour
+    this->context = reinterpret_cast<const std::uintptr_t>(VirtualAlloc(nullptr, this->function_length + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
-        // copy the original memory
-        std::memcpy(reinterpret_cast<void*>(this->context), this->function_o, this->function_size);
+    // copy the original memory
+    std::memcpy(reinterpret_cast<void*>(this->context), this->function_o, this->function_length);
 
-        // jmp back
-        const auto jmp_addr = to_hook - (this->context + this->function_size) + 5;
+    // jmp [function]
+    const auto relative_offset = to_hook - (this->context + this->function_length) + 5;
 
-        std::memcpy(jmp_patch + 1, &jmp_addr, 4u);
-        std::memmove(reinterpret_cast<void*>(this->context + this->function_size), jmp_patch, 5u);
-    }
+    std::memcpy(jmp_patch + 1, &relative_offset, 4u);
+    std::memmove(reinterpret_cast<void*>(this->context + this->function_length), jmp_patch, 5u);
 
-    if (nops)
-        std::memset(reinterpret_cast<void*>(to_hook + 5), 0x90, nops);
+    if (length)
+        std::memset(reinterpret_cast<void*>(to_hook + 5), 0x90, length);
 
-    VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_size, old_protect, &old_protect);
-    return restore ? this->context : (to_hook + this->function_size);
+    VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_length, old_protect, &old_protect);
+    return this->context;
 }
 
 // unhook will completely erase whatever you've hooked the function with
@@ -90,14 +87,12 @@ void anya_hook::unhook(std::uintptr_t to_unhook)
 {
     DWORD old_protect{0};
 
-    VirtualProtect(reinterpret_cast<void*>(to_unhook), this->function_size, PAGE_EXECUTE_READWRITE, &old_protect);
-    std::memcpy(reinterpret_cast<void*>(to_unhook), this->function_o, this->function_size);
-    VirtualProtect(reinterpret_cast<void*>(to_unhook), this->function_size, old_protect, &old_protect);
+    VirtualProtect(reinterpret_cast<void*>(to_unhook), this->function_length, PAGE_EXECUTE_READWRITE, &old_protect);
+    std::memcpy(reinterpret_cast<void*>(to_unhook), this->function_o, this->function_length);
+    VirtualProtect(reinterpret_cast<void*>(to_unhook), this->function_length, old_protect, &old_protect);
 
     std::free(this->function_o);
-
-    if (this->allocate)
-        VirtualFree(reinterpret_cast<void*>(to_unhook), 0, MEM_FREE);
+    VirtualFree(reinterpret_cast<void*>(to_unhook), 0, MEM_FREE);
 
     to_unhook = 0;
 }
@@ -109,13 +104,13 @@ void anya_hook::yield(const std::uintptr_t to_yield)
 {
     DWORD old_protect{0};
 
-    VirtualProtect(reinterpret_cast<void*>(to_yield), this->function_size, PAGE_EXECUTE_READWRITE, &old_protect);
-    this->function_t = reinterpret_cast<std::uint8_t*>(VirtualAlloc(nullptr, this->function_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    VirtualProtect(reinterpret_cast<void*>(to_yield), this->function_length, PAGE_EXECUTE_READWRITE, &old_protect);
+    this->function_t = reinterpret_cast<std::uint8_t*>(VirtualAlloc(nullptr, this->function_length, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
-    std::memcpy(this->function_t, reinterpret_cast<void*>(to_yield), this->function_size);
-    std::memcpy(reinterpret_cast<void*>(to_yield), this->function_o, this->function_size);
+    std::memcpy(this->function_t, reinterpret_cast<void*>(to_yield), this->function_length);
+    std::memcpy(reinterpret_cast<void*>(to_yield), this->function_o, this->function_length);
 
-    VirtualProtect(reinterpret_cast<void*>(to_yield), this->function_size, old_protect, &old_protect);
+    VirtualProtect(reinterpret_cast<void*>(to_yield), this->function_length, old_protect, &old_protect);
 }
 
 // resume will resume given *hooked* function
@@ -125,9 +120,9 @@ void anya_hook::resume(const std::uintptr_t to_resume)
 {
     DWORD old_protect{0};
 
-    VirtualProtect(reinterpret_cast<void*>(to_resume), this->function_size, PAGE_EXECUTE_READWRITE, &old_protect);
-    std::memcpy(reinterpret_cast<void*>(to_resume), this->function_t, this->function_size);
-    VirtualProtect(reinterpret_cast<void*>(to_resume), this->function_size, old_protect, &old_protect);
+    VirtualProtect(reinterpret_cast<void*>(to_resume), this->function_length, PAGE_EXECUTE_READWRITE, &old_protect);
+    std::memcpy(reinterpret_cast<void*>(to_resume), this->function_t, this->function_length);
+    VirtualProtect(reinterpret_cast<void*>(to_resume), this->function_length, old_protect, &old_protect);
 
     VirtualFree(this->function_t, 0, MEM_RELEASE);
 }
