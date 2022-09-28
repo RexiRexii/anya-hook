@@ -1,7 +1,6 @@
 #include "anya_hook.hpp"
 
 #include "hde32_disasm.hpp"
-#include "hde64_disasm.hpp"
 
 anya_hook::anya_hook()
 {
