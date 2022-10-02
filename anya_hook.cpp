@@ -1,5 +1,4 @@
 #include "anya_hook.hpp"
-
 #include "hde32_disasm.hpp"
 
 anya_hook::anya_hook()
@@ -38,6 +37,67 @@ std::uintptr_t calculate_function_length(const std::uintptr_t to_calculate, cons
     return size;
 }
 
+const std::uintptr_t calculate_relative_offset(const std::uintptr_t to_hook, const std::uintptr_t to_replace, const std::size_t length)
+{
+    if (to_hook > to_replace)
+        return 0 - (to_hook - to_replace) - length;
+
+    return to_replace - (to_hook + length);
+}
+
+void fix_relatives(const std::uintptr_t to_hook, const std::uintptr_t to_replace, const std::size_t length)
+{
+    auto at = to_hook;
+    while (at - to_hook < length)
+    {
+        hde32s disasm{0};
+        hde32_disasm(reinterpret_cast<void*>(at), &disasm);
+
+        switch (disasm.opcode)
+        {
+        case 0xE8:
+        {
+            if (disasm.flags & F_RELATIVE)
+            {
+                const auto call_offset = to_hook + (at - to_replace);
+                const auto relative_offset = (call_offset + disasm.imm.imm32) + disasm.len;
+
+                if (relative_offset % 10 == 0)
+                {
+                    throw std::runtime_error("[!] ERROR: Invalid Relative");
+                    std::memcpy(reinterpret_cast<void*>(at + 1), &relative_offset, 4u);
+                }
+                else
+                    throw std::runtime_error("[!] ERROR: Relative out of line");
+            }
+
+            break;
+        }
+        case 0xE9:
+        {
+            if (disasm.flags & F_RELATIVE)
+            {
+                const auto call_offset = to_hook + (at - to_replace);
+                const auto relative_offset = (call_offset + disasm.imm.imm32) + disasm.len;
+
+                if (relative_offset % 10 == 0)
+                {
+                    if (relative_offset > (relative_offset & 0xFFFFFFFF))
+                        throw std::runtime_error("[!] ERROR: Invalid Relative");
+
+                    std::memcpy(reinterpret_cast<void*>(at + 1), &relative_offset, 4u);
+                }
+                else
+                    throw std::runtime_error("[!] ERROR: Relative out of line");
+            }
+        }
+        case 0xFF: break;
+        }
+
+        at += disasm.len;
+    }
+}
+
 // detour is basically used in making a certain instruction(s) jmp to a different location
 // if its done wrong then it can cause so many things, so we make sure we "jmp back" to the original position after whatever we do
 std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_t to_replace)
@@ -55,30 +115,33 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
     std::memcpy(this->function_o, reinterpret_cast<void*>(to_hook), this->function_length);
 
     // jmp [function]
-    std::uint8_t jmp_patch[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
-    const auto jmp_offset = (to_replace - to_hook) - 5;
+    std::uint8_t jmp_patch[5] = {0xE9, 0x00, 0x00, 0x00, 0x00};
+    const auto jmp_offset = calculate_relative_offset(to_hook, to_replace, this->function_length);
 
-    std::memcpy(jmp_patch + 1, &jmp_offset, 4u);
+    std::memcpy(jmp_patch, &jmp_offset, 4u);
     std::memmove(reinterpret_cast<void*>(to_hook), jmp_patch, 5u);
 
     // create the detour
-    this->context = reinterpret_cast<const std::uintptr_t>(VirtualAlloc(nullptr, this->function_length + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    this->context = reinterpret_cast<const std::uintptr_t>(VirtualAlloc(nullptr, this->function_length + 5u, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
     // copy the original memory
     std::memcpy(reinterpret_cast<void*>(this->context), this->function_o, this->function_length);
 
     // jmp [function]
-    const auto relative_offset = to_hook - (this->context + this->function_length) + 5;
+    const auto relative_offset = calculate_relative_offset(this->context, to_hook, this->function_length);
 
-    std::memcpy(jmp_patch + 1, &relative_offset, 4u);
+    std::memcpy(jmp_patch + 2, &relative_offset, 4u);
     std::memmove(reinterpret_cast<void*>(this->context + this->function_length), jmp_patch, 5u);
 
     if (length)
-        std::memset(reinterpret_cast<void*>(to_hook + 5), 0x90, length);
+        std::memset(reinterpret_cast<void*>(to_hook + 5u), 0x90, length);
 
     VirtualProtect(reinterpret_cast<void*>(to_hook), this->function_length, old_protect, &old_protect);
+
+    fix_relatives(this->context, to_hook, this->function_length);
     return this->context;
 }
+
 
 // unhook will completely erase whatever you've hooked the function with
 // making the function return to its original form
