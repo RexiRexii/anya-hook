@@ -54,7 +54,7 @@ const auto messagebox_sub = reinterpret_cast<std::uintptr_t>(GetProcAddress(user
 
 Hook the function
 ```cpp
-context.unhook(messagebox_sub, hook_messageboxA);
+context.hook(messagebox_sub, hook_messageboxA);
 ```
 
 Unhook the function
