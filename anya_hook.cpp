@@ -1,16 +1,6 @@
 #include "anya_hook.hpp"
 #include "hde32_disasm.hpp"
 
-anya_hook::anya_hook()
-{
-    this->function_o = nullptr; // old
-    this->function_t = nullptr; // backup
-
-    this->context = 0; // detour
-
-    this->function_length = 0;
-}
-
 std::uintptr_t calculate_function_length(const std::uintptr_t to_calculate, const std::uint32_t length, std::uint32_t fnops = 0)
 {
     auto function = to_calculate;
@@ -55,25 +45,7 @@ void fix_relatives(const std::uintptr_t to_hook, const std::uintptr_t to_replace
 
         switch (disasm.opcode)
         {
-        case 0xE8:
-        {
-            if (disasm.flags & F_RELATIVE)
-            {
-                const auto call_offset = to_hook + (at - to_replace);
-                const auto relative_offset = (call_offset + disasm.imm.imm32) + disasm.len;
-
-                if (relative_offset % 10 == 0)
-                {
-                    throw std::runtime_error("[!] ERROR: Invalid Relative");
-                    std::memcpy(reinterpret_cast<void*>(at + 1), &relative_offset, 4u);
-                }
-                else
-                    throw std::runtime_error("[!] ERROR: Relative out of line");
-            }
-
-            break;
-        }
-        case 0xE9:
+        case 0xE9 || 0xE8:
         {
             if (disasm.flags & F_RELATIVE)
             {
@@ -118,7 +90,7 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
     std::uint8_t jmp_patch[5] = {0xE9, 0x00, 0x00, 0x00, 0x00};
     const auto jmp_offset = calculate_relative_offset(to_hook, to_replace, this->function_length);
 
-    std::memcpy(jmp_patch, &jmp_offset, 4u);
+    std::memcpy(jmp_patch + 1, &jmp_offset, 4u);
     std::memmove(reinterpret_cast<void*>(to_hook), jmp_patch, 5u);
 
     // create the detour
@@ -130,7 +102,7 @@ std::uintptr_t anya_hook::hook(const std::uintptr_t to_hook, const std::uintptr_
     // jmp [function]
     const auto relative_offset = calculate_relative_offset(this->context, to_hook, this->function_length);
 
-    std::memcpy(jmp_patch + 2, &relative_offset, 4u);
+    std::memcpy(jmp_patch + 1, &relative_offset, 4u);
     std::memmove(reinterpret_cast<void*>(this->context + this->function_length), jmp_patch, 5u);
 
     if (length)
