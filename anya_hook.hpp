@@ -13,10 +13,9 @@ public:
 
 	std::uintptr_t context; // detour
 
-	std::size_t function_length;
+	std::size_t function_length; // hook_size
 
 public:
-	explicit anya_hook();
 	std::uintptr_t hook(const std::uintptr_t to_hook, const std::uintptr_t to_replace);
 
 	void unhook(std::uintptr_t to_unhook);
